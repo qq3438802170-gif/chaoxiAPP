@@ -1,0 +1,109 @@
+name: Build Tide Flutter App
+
+on:
+  workflow_dispatch:
+    inputs:
+      server_url:
+        description: '你的云手机后端访问地址 (千万别填127.0.0.1，填你公网能访问的那个)'
+        required: true
+        default: 'https://'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 1. 准备 Java 环境
+      uses: actions/setup-java@v3
+      with:
+        distribution: 'zulu'
+        java-version: '17'
+
+    - name: 2. 准备 Flutter 环境
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.19.0'
+        channel: 'stable'
+
+    - name: 3. 一键生成 Flutter 工程
+      run: |
+        flutter create tide_app
+        cd tide_app
+        flutter pub add webview_flutter
+
+    - name: 4. 突破安卓限制 (允许 HTTP 与权限)
+      run: |
+        cd tide_app
+        sed -i 's/<application/<application android:usesCleartextTraffic="true"/g' android/app/src/main/AndroidManifest.xml
+        sed -i '/<application/i \    <uses-permission android:name="android.permission.INTERNET" />' android/app/src/main/AndroidManifest.xml
+        sed -i '/<application/i \    <uses-permission android:name="android.permission.VIBRATE" />' android/app/src/main/AndroidManifest.xml
+
+    - name: 5. 注入原生高压舱与通信桥梁
+      run: |
+        cat << 'EOF' > tide_app/lib/main.dart
+        import 'package:flutter/material.dart';
+        import 'package:webview_flutter/webview_flutter.dart';
+
+        void main() {
+          WidgetsFlutterBinding.ensureInitialized();
+          runApp(const MyApp());
+        }
+
+        class MyApp extends StatelessWidget {
+          const MyApp({super.key});
+          @override
+          Widget build(BuildContext context) {
+            return const MaterialApp(
+              title: '潮汐',
+              debugShowCheckedModeBanner: false,
+              home: WebViewScreen(),
+            );
+          }
+        }
+
+        class WebViewScreen extends StatefulWidget {
+          const WebViewScreen({super.key});
+          @override
+          State<WebViewScreen> createState() => _WebViewScreenState();
+        }
+
+        class _WebViewScreenState extends State<WebViewScreen> {
+          late final WebViewController _controller;
+
+          @override
+          void initState() {
+            super.initState();
+            _controller = WebViewController()
+              ..setJavaScriptMode(JavaScriptMode.unrestricted)
+              ..setBackgroundColor(const Color(0xFFF5F5F7))
+              ..addJavaScriptChannel(
+                'TideNative',
+                onMessageReceived: (JavaScriptMessage message) {
+                  print("原生系统收到网页的消息: ${message.message}");
+                },
+              )
+              ..loadRequest(Uri.parse('${{ github.event.inputs.server_url }}'));
+          }
+
+          @override
+          Widget build(BuildContext context) {
+            return Scaffold(
+              body: SafeArea(
+                bottom: false,
+                child: WebViewWidget(controller: _controller),
+              ),
+            );
+          }
+        }
+        EOF
+
+    - name: 6. 编译发布版 APK
+      run: |
+        cd tide_app
+        flutter build apk --release
+
+    - name: 7. 提取生成的安装包
+      uses: actions/upload-artifact@v4
+      with:
+        name: 潮汐APP
+        path: tide_app/build/app/outputs/flutter-apk/app-release.apk
